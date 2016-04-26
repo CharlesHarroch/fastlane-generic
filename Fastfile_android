@@ -1,0 +1,195 @@
+################################################################################
+# BEFORE ALL
+################################################################################
+
+  before_all do
+    config_slack_url
+  end
+
+################################################################################
+# PUBLIC LANES
+################################################################################
+
+  desc "Submit a new daily build to Crashlytics"
+  desc "A daily build is sent to Loyalty team by default"
+  lane :development do |options|
+    # Kick off private lane
+    prepare(remote_branch: options[:remote_branch])
+    # Send the project to take a "build and archive" treatment
+    build_and_archive(options.merge(lane_name: 'development'))
+    # Publish the result
+    publish(options.merge(lane_name: 'development'))
+  end
+
+#------------------------------------------------------------------------------
+
+  desc "Deploy a Live Preview version on Appetize.io"
+  desc "Sprint end weekly build"
+  lane :live_preview do |options|
+    build_simulator(options.merge(lane_name: 'live_preview'))
+  end
+
+#------------------------------------------------------------------------------
+
+  desc "Launch Unit & UI Test"
+  desc "During development"
+  lane :testing do |options|
+    config = YAML.load(open(File.join(File.dirname(__FILE__),"fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    #scan(scheme: settings['scheme'])
+  end
+
+#------------------------------------------------------------------------------
+
+
+  desc "Deploy a new stable version"
+  desc "Sprint end weekly build"
+  lane :stable do |options|
+    # Kick off
+    prepare(remote_branch: options[:remote_branch])
+    # Send the project to take a "build and archive" treatment
+    build_and_archive(options.merge(lane_name: 'stable'))
+    # Publish the result
+    publish(options)
+  end
+
+#------------------------------------------------------------------------------
+
+  desc "Deploy a new version to the Google Play"
+  desc "Google Play build!"
+  lane :release do |options|
+    # Kick off
+    prepare(remote_branch: options[:remote_branch])
+    # Send the project to take a "build and archive" treatment
+    build_and_archive(options.merge(lane_name: 'release'))
+    # Upload to iTunes Connect
+    deliver(
+      skip_deploy: true,
+      force: true
+    )
+  end
+
+################################################################################
+# AFTER CALLBACK
+################################################################################
+
+  after_all do |lane|
+
+    if lane_context[SharedValues::APPETIZE_APP_URL]
+      payload_data = {'What\'s new' => CHANGELOG, 'Lien de test' => lane_context[SharedValues::APPETIZE_APP_URL]}
+    else
+      payload_data = {'What\'s new' => CHANGELOG}
+    end
+
+    slack(
+      message: "Successfully deployed new #{lane} build (#{Actions.lane_context[SharedValues::BUILD_NUMBER]}).",
+      payload: payload_data
+    )
+    clean_build_artifacts
+  end
+
+
+  error do |lane, exception|
+
+    slack(
+      message: exception.message,
+      success: false
+    )
+  end
+
+################################################################################
+# PRIVATE LANES
+################################################################################
+
+
+  private_lane :config_slack_url do
+    # Load config file
+    config = YAML.load(open(File.join(File.dirname(__FILE__),"./fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    # Get slack URL
+    slack_url = settings['slack_url']
+    ENV["SLACK_URL"] = slack_url
+  end
+
+  private_lane :prepare do |options|
+    #ensure_git_status_clean
+    current_branch = git_branch
+    # # Checkout remote branch if needed
+    if !options[:remote_branch].nil? && options[:remote_branch] != current_branch
+      puts "Checkout new branch #{options[:remote_branch]}"
+      git_checkout(remote_branch: options[:remote_branch])
+    end
+  end
+
+
+  private_lane :build_simulator do |options|
+    # Get configurations
+    config = YAML.load(open(File.join(File.dirname(__FILE__), "fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    lane_setting = settings[options[:lane_name]]
+
+    load_release_notes
+
+    desc "Unzip ipa for send .app to Appetize : ./exportApp/Payload"
+    Actions.sh"cd ../build/Build/Products/Debug-iphonesimulator/ && zip -r appetize.zip \"#{settings['scheme']}.app\""
+    appetize(
+      api_token: lane_setting['appetize_api_token'],
+      public_key: lane_setting['appetize_public_key'],
+      path: "./build/Build/Products/Debug-iphonesimulator/appetize.zip",
+      note: CHANGELOG
+    )
+  end
+
+
+
+  private_lane :build_and_archive do |options|
+    # Get configurations
+    config = YAML.load(open(File.join(File.dirname(__FILE__), "fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    lane_setting = settings[options[:lane_name]]
+
+    gradle(task: 'assemble', build_type: 'release')
+
+  end
+
+
+
+  private_lane :publish do |options|
+
+    load_release_notes
+
+    Actions.lane_context[SharedValues::GRADLE_APK_OUTPUT_PATH]
+
+    config = YAML.load(open(File.join(File.dirname(__FILE__), "fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    lane_setting = settings[options[:lane_name]]
+
+    if lane_setting['crashlytics_notifications']
+      crashlytics_notifications = lane_setting['crashlytics_notifications']
+      crashlytics_groups = lane_setting['crashlytics_groups'] if lane_setting['crashlytics_groups']
+      crashlytics(
+        api_token: settings['crashlytics_api_token'],
+        build_secret: settings['crashlytics_build_secret'],
+        groups: lane_setting['crashlytics_groups'],
+        notifications: lane_setting['crashlytics_notifications'],
+        notes: CHANGELOG
+      )
+    else
+      crashlytics(
+        api_token: settings['crashlytics_api_token'],
+        build_secret: settings['crashlytics_build_secret'],
+        notes: CHANGELOG
+      )
+    end
+
+  end
+
+  private_lane :load_release_notes do
+    desc "Get and format all the commits since the last version bump commit."
+    changes = changelog_from_git_commits
+    if changes
+      CHANGELOG = changes + "\n"
+    else
+      CHANGELOG = ""
+    end
+  end

@@ -1,0 +1,44 @@
+# Project Plateform [ios, android]
+platform: ios
+
+# Slack URL to current project's channel
+slack_url: https://hooks.slack.com/services/XXXXXXXXXXXXXXX
+
+# SDK to use when build for Simulator (Appetize.io)
+sdk_simulator: iphonesimulator9.3
+
+# Crashlytics API Token
+crashlytics_api_token: XXXXXXXXXXXXXXX
+crashlytics_build_secret: XXXXXXXXXXXXXXX
+
+# Project scheme name
+project_name: YOUR_PROJECT_NAME
+
+development:
+  scheme: YOUR_PROJECT_SCHEME
+  remote_branch: branch-fastlane # Project's reference branch to checkout
+  export_method: ad-hoc # Export methode to use when "build" ["app-store", "ad-hoc", "package", "enterprise", "development", "developer-id"]
+  crashlytics_notifications: NO # Enable/disable notifications
+  developer_portal_account_id: webmaster@xxxx.com
+  team_id: XXXXXXXX # Team id to use
+  targets: # A collection of all project's targets. This is useful when fetching provisioning profiles for each of them
+   - target_identifier: YOUR_PROJECT_TARGET # Convenience identifier. This is choose by you and reuse it in your Fastfile.
+     app_identifier: xxx.xxx.xxx # Bundle identifier for current target
+
+live_preview:
+  scheme: YOUR_PROJECT_SCHEME
+  remote_branch: branch-fastlane # Project's reference branch to checkout
+  appetize_api_token: xxxxxxxxx
+  appetize_public_key: xxxxxxxxxxx
+
+stable:
+  scheme: MyDPP
+  remote_branch: master
+  export_method: enterprise
+  crashlytics_notifications: YES
+  crashlytics_groups: betatesters
+  developer_portal_account_id: xxx@xxx.com
+  team_id: XXXXXXX # Team id to use
+  targets:
+    - target_identifier: YOUR_PROJECT_TARGET # Convenience identifier. This is choose by you and reuse it in your Fastfile.
+      app_identifier: xxx.xxx.xxx # Bundle identifier for current target

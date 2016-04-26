@@ -1,0 +1,345 @@
+################################################################################
+# BEFORE ALL
+################################################################################
+
+  before_all do
+    config_slack_url
+  end
+
+################################################################################
+# PUBLIC LANES
+################################################################################
+desc "Init new application"
+desc "Create new Application Id in Apple developper portal. Generate Certificate & provisionning if not exist"
+lane :init_dev do |options|
+  initialize_apple_portal(lane_name: 'development')
+end
+
+
+  desc "Submit a new daily build to Crashlytics"
+  desc "A daily build is sent to Loyalty team by default"
+  lane :development do |options|
+    # Kick off private lane
+    prepare(remote_branch: options[:remote_branch])
+    # Download all requred provisioning profiles
+    get_provisioning_profile(options.merge(lane_name: 'development'))
+    # Last step before 'build&archive'
+    project_warm_up(options.merge(lane_name: 'development'))
+    # Send the project to take a "build and archive" treatment
+    build_and_archive(options.merge(lane_name: 'development'))
+    # Publish the result
+    publish(options.merge(lane_name: 'development'))
+
+
+    config = YAML.load(open(File.join(File.dirname(__FILE__),"fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+
+    # notify with Slack
+    send_slack_notification(
+      message: "Successfully deployed new iOS development build (#{Actions.lane_context[SharedValues::BUILD_NUMBER]}) to Crashlytics.",
+      payload: {'What\'s new' => CHANGELOG}
+    )
+  end
+
+#------------------------------------------------------------------------------
+
+  desc "Deploy a Live Preview version on Appetize.io"
+  desc "Sprint end weekly build"
+  lane :live_preview do |options|
+    prepare(remote_branch: options[:remote_branch])
+    build_simulator(options.merge(lane_name: 'live_preview'))
+
+    config = YAML.load(open(File.join(File.dirname(__FILE__),"fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+
+    # notify with Slack
+    send_slack_notification(
+      message: "Successfully deployed new iOS live preview build.",
+      payload: {'What\'s new' => CHANGELOG, 'Lien de test' => lane_context[SharedValues::APPETIZE_APP_URL]}
+    )
+  end
+
+#------------------------------------------------------------------------------
+
+  desc "Launch Unit & UI Test"
+  desc "During development"
+  lane :testing do |options|
+    config = YAML.load(open(File.join(File.dirname(__FILE__),"fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    lane_setting = settings['development']
+    scan(
+      workspace: "#{settings['project_name']}.xcworkspace",
+      scheme: lane_setting['scheme']
+    )
+  end
+
+#------------------------------------------------------------------------------
+
+
+  desc "Deploy a new stable version"
+  desc "Sprint end weekly build"
+  lane :stable do |options|
+    # Kick off
+    prepare(remote_branch: options[:remote_branch])
+    # Download all required provisioning profiles
+    get_provisioning_profile(options.merge(lane_name: 'stable'))
+    # Last step before 'build&archive'
+    project_warm_up(options.merge(lane_name: 'stable'))
+    # Send the project to take a "build and archive" treatment
+    build_and_archive(options.merge(lane_name: 'stable'))
+    # Publish the result
+    publish(options)
+  end
+
+#------------------------------------------------------------------------------
+
+  desc "Deploy a new version to the App Store"
+  desc "App Store build!"
+  lane :release do |options|
+    # Kick off
+    prepare(remote_branch: options[:remote_branch])
+    # Download all required provisioning profiles
+    get_provisioning_profile(options.merge(lane_name: 'release'))
+    # Last step before 'build&archive'
+    project_warm_up(options.merge(lane_name: 'release'))
+    # Send the project to take a "build and archive" treatment
+    build_and_archive(options.merge(lane_name: 'release'))
+    # Upload to iTunes Connect
+    deliver(
+      skip_deploy: true,
+      force: true
+    )
+  end
+
+################################################################################
+# AFTER CALLBACK
+################################################################################
+
+  after_all do |lane|
+    clean_build_artifacts
+  end
+
+
+  error do |lane, exception|
+
+    slack(
+      message: exception.message,
+      success: false
+    )
+  end
+
+################################################################################
+# PRIVATE LANES
+################################################################################
+
+
+  private_lane :send_slack_notification do |options|
+    puts "TEST"
+    slack(
+      message: options[:message],
+      payload: options[:payload]
+    )
+  end
+
+  private_lane :initialize_apple_portal do |options|
+    # Load config file
+    config = YAML.load(open(File.join(File.dirname(__FILE__),"./fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    lane_setting = settings[options[:lane_name]]
+
+    cert(
+      username: lane_setting['developer_portal_account_id'],
+      team_id: lane_setting['team_id']
+    )
+
+  end
+
+
+  private_lane :config_slack_url do
+    # Load config file
+    config = YAML.load(open(File.join(File.dirname(__FILE__),"./fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    # Get slack URL
+    slack_url = settings['slack_url']
+    ENV["SLACK_URL"] = slack_url
+  end
+
+
+
+  private_lane :prepare do |options|
+    #ensure_git_status_clean
+    current_branch = git_branch
+    # # Checkout remote branch if needed
+    if !options[:remote_branch].nil? && options[:remote_branch] != current_branch
+      puts "Checkout new branch #{options[:remote_branch]}"
+      git_checkout(remote_branch: options[:remote_branch])
+    end
+    cocoapods
+  end
+
+
+
+  private_lane :get_provisioning_profile do |options|
+    # Get targets
+    config = YAML.load(open(File.join(File.dirname(__FILE__),"fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    lane_setting = settings[options[:lane_name]]
+    targets = lane_setting['targets']
+
+    username = lane_setting['developer_portal_account_id'] if lane_setting['developer_portal_account_id']
+
+    targets.each do |target_setting|
+      # Get the latest provisionnig profiles from the Dev Portal
+      if lane_setting['export_method'] == 'ad-hoc'
+        udid = sigh(
+          username: username,
+          adhoc: true,
+          team_id: lane_setting['team_id'],
+          app_identifier: target_setting['app_identifier'],
+          output_path: "/tmp")
+      else
+        udid = sigh(
+          username: username,
+          adhoc: false,
+          team_id: lane_setting['team_id'],
+          app_identifier: target_setting['app_identifier'],
+          output_path: "/tmp")
+      end
+
+      ENV["#{target_setting['target_identifier']}_UDID"] = udid
+      ENV["#{target_setting['target_identifier']}_PROVISIONING_PATH"] = Actions.lane_context[SharedValues::SIGH_PROFILE_PATH]
+    end
+  end
+
+
+
+  private_lane :build_simulator do |options|
+    # Get configurations
+    config = YAML.load(open(File.join(File.dirname(__FILE__), "fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    lane_setting = settings[options[:lane_name]]
+
+    desc "Build Ipa with Simulator SDK"
+    xcodebuild(
+      workspace: "#{settings['project_name']}.xcworkspace",
+      scheme: lane_setting['scheme'],
+      build_settings: {
+          "ARCHS" => "i386",
+          "XCODE_BUILD_PATH" => "./build"
+      },
+      sdk: settings['sdk_simulator'],
+      derivedDataPath: "./build",
+      output_style: :basic
+    )
+
+    load_release_notes
+
+    desc "Unzip ipa for send .app to Appetize : ./exportApp/Payload"
+    Actions.sh"cd ../build/Build/Products/Debug-iphonesimulator/ && zip -r appetize.zip \"#{settings['project_name']}.app\""
+    appetize(
+      api_token: lane_setting['appetize_api_token'],
+      #public_key: lane_setting['appetize_public_key'],
+      path: "./build/Build/Products/Debug-iphonesimulator/appetize.zip",
+      note: CHANGELOG
+    )
+  end
+
+
+
+  private_lane :build_and_archive do |options|
+    # Get configurations
+    config = YAML.load(open(File.join(File.dirname(__FILE__), "fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    lane_setting = settings[options[:lane_name]]
+
+    # Make sure current directory is clean
+    File.delete("../#{settings['scheme']}.ipa") if File.exist? "../#{settings['scheme']}.ipa"
+
+    gym(
+      use_legacy_build_api: true,
+      scheme: lane_setting['scheme'],
+      provisioning_profile_path: ENV["PROJECT_PROVISIONING_PATH"],
+      export_method: lane_setting['export_method'],
+      workspace: "#{settings['project_name']}.xcworkspace",
+    )
+
+  end
+
+
+
+  private_lane :publish do |options|
+
+    load_release_notes
+
+    config = YAML.load(open(File.join(File.dirname(__FILE__), "fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    lane_setting = settings[options[:lane_name]]
+
+    if lane_setting['crashlytics_notifications']
+      crashlytics_notifications = lane_setting['crashlytics_notifications']
+      crashlytics_groups = lane_setting['crashlytics_groups'] if lane_setting['crashlytics_groups']
+      crashlytics(
+        api_token: settings['crashlytics_api_token'],
+        build_secret: settings['crashlytics_build_secret'],
+        groups: lane_setting['crashlytics_groups'],
+        notifications: lane_setting['crashlytics_notifications'],
+        notes: CHANGELOG
+      )
+    else
+      crashlytics(
+        api_token: settings['crashlytics_api_token'],
+        build_secret: settings['crashlytics_build_secret'],
+        notes: CHANGELOG
+      )
+    end
+
+  end
+
+
+
+  private_lane :load_release_notes do
+    desc "Get and format all the commits since the last version bump commit."
+    changes = changelog_from_git_commits
+    if changes
+      CHANGELOG = changes + "\n"
+    else
+      CHANGELOG = ""
+    end
+  end
+
+
+
+  private_lane :project_warm_up do |options|
+    # Get configurations
+    config = YAML.load(open(File.join(File.dirname(__FILE__), "fastlane_config.yaml")))
+    settings = OpenStruct.new(config)
+    lane_setting = settings[options[:lane_name]]
+
+    # EXPERIMENTAL START
+    # Add app icon overlay if needed
+    if lane_setting['add_icon_overlay']
+      case options['lane_name']
+      when 'development'
+        add_icon_overlay(
+          overlay_image_path: 'actions/assets/nightly_ribbon.png',
+          appiconset_path: lane_setting['appiconset_path']
+        )
+      when 'stable'
+        add_icon_overlay(
+          overlay_image_path: 'actions/assets/dev_ribbon.png',
+          appiconset_path: lane_setting['appiconset_path']
+        )
+      else
+        # No overlay has been requested.
+      end
+    end
+    # EXPERIMENTAL END
+
+    # Increment build number if needed
+    case options['lane_name']
+    when 'release'
+      # No increment build number required.
+    else
+      increment_build_number
+    end
+  end
